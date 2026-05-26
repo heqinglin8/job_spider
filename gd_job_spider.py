@@ -286,12 +286,15 @@ def parse_job(detail: dict, city_name: str = "") -> dict:
         if val:
             tags.append(val)
 
+    recruit_num = str(detail.get("acb240", "") or "").replace("人", "").strip()
+
     return {
         "职位ID":     detail.get("bcb009", ""),
         "职位名称":   detail.get("bce055", ""),
         "公司名称":   detail.get("aab004", ""),
         "标签":       " | ".join(tags),
         "薪资":       detail.get("bcca68", ""),
+        "招聘人数":   recruit_num,
         "其他福利":   detail.get("bcb182Name", "") or "",
         "联系人":     detail.get("aae004", "") or "",
         "联系电话":   detail.get("aae005", "") or "",
@@ -399,7 +402,7 @@ def crawl_city(
 # ──────────────────────────────────────────────────────────────────────
 
 FIELDS = [
-    "职位名称", "公司名称", "标签", "薪资", "其他福利",
+    "职位名称", "公司名称", "标签", "薪资", "招聘人数", "其他福利",
     "联系人", "联系电话", "学历要求", "工作经验",
     "工作城市", "工作地点", "详细地址", "岗位描述",
     "发布时间", "截止时间", "详情URL", "职位ID",

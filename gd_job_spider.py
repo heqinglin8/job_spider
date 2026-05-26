@@ -163,7 +163,8 @@ def browser_login(session: requests.Session) -> None:
         logger.info(f"最终 URL: {page.url}")
 
         # ── 调试：打印 localStorage 和 sessionStorage 全部内容 ──
-        storage_dump = page.evaluate("""() => {
+        # SPA 登录后可能触发多次导航，需等页面稳定后再 evaluate
+        _JS_DUMP_STORAGE = """() => {
             function dump(storage) {
                 const out = {};
                 for (let i = 0; i < storage.length; i++) {
@@ -174,7 +175,19 @@ def browser_login(session: requests.Session) -> None:
                 return out;
             }
             return { local: dump(localStorage), session: dump(sessionStorage) };
-        }""")
+        }"""
+        storage_dump = None
+        for _attempt in range(5):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                storage_dump = page.evaluate(_JS_DUMP_STORAGE)
+                break
+            except Exception:
+                logger.debug(f"evaluate 第 {_attempt + 1} 次失败，等待页面稳定后重试...")
+                page.wait_for_timeout(2000)
+        if storage_dump is None:
+            logger.warning("多次尝试读取 storage 均失败，跳过 token 提取")
+            storage_dump = {"local": {}, "session": {}}
         import json as _json
         logger.info("=== localStorage ===\n" + _json.dumps(storage_dump["local"], ensure_ascii=False, indent=2)[:3000])
         logger.info("=== sessionStorage ===\n" + _json.dumps(storage_dump["session"], ensure_ascii=False, indent=2)[:2000])

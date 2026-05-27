@@ -450,14 +450,20 @@ def launch_gui(default_text: str = DEFAULT_WATERMARK_TEXT) -> None:
 
     root = tk.Tk()
     root.title("图片水印工具")
-    root.geometry("640x220")
+    root.geometry("760x300")
     root.resizable(False, False)
 
     image_var = tk.StringVar()
+    image_display_var = tk.StringVar(value="暂无图片")
     text_var = tk.StringVar()
     status_var = tk.StringVar(
         value=f"请选择一张图片；水印内容可自定义，留空则使用默认：{default_text}"
     )
+
+    def sync_image_display(*_args: object) -> None:
+        image_display_var.set(image_var.get().strip() or "暂无图片")
+
+    image_var.trace_add("write", sync_image_display)
 
     def choose_image() -> None:
         file_path = filedialog.askopenfilename(
@@ -469,6 +475,7 @@ def launch_gui(default_text: str = DEFAULT_WATERMARK_TEXT) -> None:
         )
         if file_path:
             image_var.set(file_path)
+            image_display_var.set(file_path)
             status_var.set("已选择图片，点击“开始加水印”即可生成。")
 
     def submit() -> None:
@@ -495,8 +502,9 @@ def launch_gui(default_text: str = DEFAULT_WATERMARK_TEXT) -> None:
     root.columnconfigure(1, weight=1)
 
     tk.Label(root, text="图片路径").grid(row=0, column=0, padx=12, pady=(18, 8), sticky="w")
-    tk.Entry(root, textvariable=image_var, width=58).grid(row=0, column=1, padx=0, pady=(18, 8), sticky="ew")
-    tk.Button(root, text="选择图片", command=choose_image, width=12).grid(row=0, column=2, padx=12, pady=(18, 8))
+    tk.Entry(root, textvariable=image_var, width=48).grid(
+        row=0, column=1, padx=0, pady=(18, 8), sticky="ew"
+    )
 
     tk.Label(root, text="水印内容").grid(row=1, column=0, padx=12, pady=8, sticky="w")
     tk.Entry(root, textvariable=text_var, width=58).grid(row=1, column=1, padx=0, pady=8, sticky="ew")
@@ -504,8 +512,22 @@ def launch_gui(default_text: str = DEFAULT_WATERMARK_TEXT) -> None:
         row=2, column=1, padx=0, pady=(0, 6), sticky="w"
     )
 
-    tk.Button(root, text="开始加水印", command=submit, width=16, height=2).grid(
-        row=3, column=1, padx=0, pady=(14, 10), sticky="w"
+    action_frame = tk.Frame(root)
+    action_frame.grid(row=3, column=1, padx=0, pady=(10, 0), sticky="w")
+
+    tk.Button(action_frame, text="选择图片", command=choose_image, width=12).grid(
+        row=0, column=0, sticky="w"
+    )
+    tk.Label(
+        action_frame,
+        textvariable=image_display_var,
+        fg="#555555",
+        anchor="w",
+        justify="left",
+        wraplength=560,
+    ).grid(row=1, column=0, pady=(8, 10), sticky="w")
+    tk.Button(action_frame, text="开始加水印", command=submit, width=12).grid(
+        row=2, column=0, sticky="w"
     )
 
     tk.Label(
@@ -514,8 +536,8 @@ def launch_gui(default_text: str = DEFAULT_WATERMARK_TEXT) -> None:
         fg="#555555",
         anchor="w",
         justify="left",
-        wraplength=600,
-    ).grid(row=4, column=0, columnspan=3, padx=12, pady=(4, 0), sticky="w")
+        wraplength=720,
+    ).grid(row=4, column=0, columnspan=2, padx=12, pady=(8, 0), sticky="w")
 
     root.bind("<Return>", lambda _event: submit())
     root.mainloop()

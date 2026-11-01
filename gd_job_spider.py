@@ -12,17 +12,24 @@ import json
 import csv
 import logging
 import argparse
-import os
+import re
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ──────────────────────────────────────────────────────────────────────
 # 基础配置
 # ──────────────────────────────────────────────────────────────────────
 
 BASE_URL = "https://ggfw.hrss.gd.gov.cn/recruitment/internet/main"
+PROJECT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "output"
+REQUEST_TIMEOUT = 15
+RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 
 HEADERS = {
     "User-Agent": (
@@ -162,8 +169,8 @@ def browser_login(session: requests.Session) -> None:
         page.wait_for_timeout(2000)
         logger.info(f"最终 URL: {page.url}")
 
-        # ── 调试：打印 localStorage 和 sessionStorage 全部内容 ──
-        # SPA 登录后可能触发多次导航，需等页面稳定后再 evaluate
+        # SPA 登录后可能触发多次导航，需等页面稳定后再 evaluate。
+        # 不打印 storage 全量内容，避免把 token 或其他敏感信息写入日志。
         _JS_DUMP_STORAGE = """() => {
             function dump(storage) {
                 const out = {};
@@ -188,9 +195,6 @@ def browser_login(session: requests.Session) -> None:
         if storage_dump is None:
             logger.warning("多次尝试读取 storage 均失败，跳过 token 提取")
             storage_dump = {"local": {}, "session": {}}
-        import json as _json
-        logger.info("=== localStorage ===\n" + _json.dumps(storage_dump["local"], ensure_ascii=False, indent=2)[:3000])
-        logger.info("=== sessionStorage ===\n" + _json.dumps(storage_dump["session"], ensure_ascii=False, indent=2)[:2000])
 
         # 提取 token：在 localStorage 和 sessionStorage 中递归搜索
         def _find_token(obj):
@@ -260,9 +264,7 @@ def fetch_position_list(
     if keyword:
         payload["bce055"] = keyword
 
-    resp = session.post(url, json=payload, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    data = request_json(session, "POST", url, json=payload)
     if not data.get("success"):
         raise RuntimeError(f"列表接口失败: {data.get('msg', '未知错误')}")
     return data["data"]
@@ -271,12 +273,29 @@ def fetch_position_list(
 def fetch_position_detail(session: requests.Session, position_id: str) -> dict:
     """抓取单个职位详情"""
     url = f"{BASE_URL}/internet/r/c/webpage/homepage/position/detail/{position_id}"
-    resp = session.get(url, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    data = request_json(session, "GET", url)
     if not data.get("success"):
         raise RuntimeError(f"详情接口失败 [{position_id}]: {data.get('msg', '未知错误')}")
     return data["data"]
+
+
+def request_json(
+    session: requests.Session,
+    method: str,
+    url: str,
+    **kwargs,
+) -> dict:
+    """发送请求并解析 JSON，统一处理 HTTP 和响应格式错误。"""
+    response = session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"接口返回的不是有效 JSON: {url}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"接口返回格式异常（应为对象）: {url}")
+    return data
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -422,18 +441,62 @@ FIELDS = [
 ]
 
 
-def save_csv(jobs: list[dict], filepath: str) -> None:
-    with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+def save_csv(jobs: list[dict], filepath: Path) -> None:
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with filepath.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(jobs)
     logger.info(f"已保存 CSV: {filepath} ({len(jobs)} 条)")
 
 
-def save_json(jobs: list[dict], filepath: str) -> None:
-    with open(filepath, "w", encoding="utf-8") as f:
+def save_json(jobs: list[dict], filepath: Path) -> None:
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with filepath.open("w", encoding="utf-8") as f:
         json.dump(jobs, f, ensure_ascii=False, indent=2)
     logger.info(f"已保存 JSON: {filepath} ({len(jobs)} 条)")
+
+
+def create_session() -> requests.Session:
+    """创建带连接复用和有限重试能力的 HTTP session。"""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.5,
+        status_forcelist=RETRY_STATUS_CODES,
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def safe_filename(value: str) -> str:
+    """清理文件名中的路径分隔符和 Windows 不允许字符。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', "_", value).strip(" .")
+    return cleaned or "jobs"
+
+
+def positive_int(value: str) -> int:
+    """argparse 类型：要求输入正整数。"""
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("必须是大于 0 的整数")
+    return number
+
+
+def nonnegative_float(value: str) -> float:
+    """argparse 类型：要求输入非负数。"""
+    number = float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("必须是大于或等于 0 的数字")
+    return number
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -479,16 +542,16 @@ def main():
         help="跳过详情页请求（更快，但缺少岗位描述、联系方式）",
     )
     parser.add_argument(
-        "--max-pages", type=int, default=MAX_PAGES_PER_CITY, metavar="N",
+        "--max-pages", type=positive_int, default=MAX_PAGES_PER_CITY, metavar="N",
         help=f"每个城市最多抓取页数 (默认 {MAX_PAGES_PER_CITY})",
     )
     parser.add_argument(
-        "--delay", type=float, default=REQUEST_DELAY, metavar="秒",
+        "--delay", type=nonnegative_float, default=REQUEST_DELAY, metavar="秒",
         help=f"请求间隔秒数 (默认 {REQUEST_DELAY})",
     )
     parser.add_argument(
-        "--output-dir", default=".", metavar="目录",
-        help="输出目录 (默认当前目录)",
+        "--output-dir", default=str(DEFAULT_OUTPUT_DIR), metavar="目录",
+        help=f"输出目录 (默认 {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
         "--format", choices=["csv", "json", "both"], default="both",
@@ -509,10 +572,10 @@ def main():
         parser.error("请指定 --cities 或 --all-cities")
 
     request_delay = args.delay
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    session = create_session()
 
     # 抓详情时才需要登录（联系电话字段需要登录权限）
     if not args.no_detail:
@@ -541,12 +604,12 @@ def main():
     # 生成输出文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     city_tag = "_".join(target_cities.keys()) if len(target_cities) <= 3 else "全省"
-    base_name = f"gd_jobs_{city_tag}_{timestamp}"
+    base_name = safe_filename(f"gd_jobs_{city_tag}_{timestamp}")
 
     if args.format in ("csv", "both"):
-        save_csv(all_jobs, os.path.join(args.output_dir, f"{base_name}.csv"))
+        save_csv(all_jobs, output_dir / f"{base_name}.csv")
     if args.format in ("json", "both"):
-        save_json(all_jobs, os.path.join(args.output_dir, f"{base_name}.json"))
+        save_json(all_jobs, output_dir / f"{base_name}.json")
 
     logger.info(f"全部完成，共 {len(all_jobs)} 条职位数据（已去重，全局唯一职位ID数: {len(global_seen_ids)}）")
 

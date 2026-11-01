@@ -2,13 +2,16 @@
 job_spider
 # 使用方法
   pip3 install requests
-  ## 抓取广州所有职位（含详情，最多 1000 条）
+  ## 抓取广州所有职位（含详情，最多 1000 条），结果默认保存到 output/
   python3 gd_job_spider.py --cities 广州
   ## 多城市 + 关键词，跳过详情（更快）
   python3 gd_job_spider.py --cities 广州 深圳 --keyword 工程师 --no-detail
   ## 快速测试（只抓 3 页）
   python3 gd_job_spider.py --cities 广州 --max-pages 3
-  ## 抓取全省所有城市，保存到指定目录
+  ## 抓取全省所有城市，结果默认保存到 output/
+  python3 gd_job_spider.py --all-cities
+
+  ## 也可以显式指定输出目录
   python3 gd_job_spider.py --all-cities --output-dir ./output
 
 你是一个专业的爬虫工程师，请分析这个地址和访问这个地址获取到的内容：https://ggfw.hrss.gd.gov.cn/recruitment/internet/main/#/search?type=1&fromSSO=1，然后写一个爬虫脚本，这个脚本满足：

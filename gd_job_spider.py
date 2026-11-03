@@ -12,6 +12,7 @@ import json
 import csv
 import logging
 import argparse
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,11 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://ggfw.hrss.gd.gov.cn/recruitment/internet/main"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "output"
+DEFAULT_TOKEN_FILE = PROJECT_DIR / ".gd_job_token"
+DEFAULT_COOKIE_FILE = PROJECT_DIR / "cookie.txt"
+LEGACY_COOKIE_FILE = PROJECT_DIR / ".gd_job_cookie"
+TOKEN_ENV_VAR = "GD_JOB_TOKEN"
+COOKIE_ENV_VAR = "GD_JOB_COOKIE"
 REQUEST_TIMEOUT = 15
 RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 
@@ -88,6 +94,133 @@ _CHECK_CITY_CODE = "440100000000"   # 用广州职位验证登录（数据量大
 _CHECK_SAMPLE_SIZE = 5              # 验证登录时最多抽取的样本数
 
 
+def normalize_token(token: Optional[str]) -> str:
+    """清理 token，并兼容用户配置了 ``Bearer xxx`` 的情况。"""
+    if not token:
+        return ""
+    token = token.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
+def load_cached_token(token_file: Path) -> tuple[str, str]:
+    """读取本地缓存 token，返回 (token, 来源)。环境变量优先。"""
+    env_token = normalize_token(os.getenv(TOKEN_ENV_VAR))
+    if env_token:
+        return env_token, f"环境变量 {TOKEN_ENV_VAR}"
+
+    try:
+        file_token = normalize_token(token_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "", ""
+    except OSError as exc:
+        logger.warning(f"读取本地 token 文件失败 [{token_file}]: {exc}")
+        return "", ""
+
+    if file_token:
+        return file_token, str(token_file)
+    return "", ""
+
+
+def normalize_cookie_header(cookie_header: Optional[str]) -> str:
+    """清理 Cookie 请求头，兼容用户复制了 ``Cookie:`` 前缀的情况。"""
+    if not cookie_header:
+        return ""
+    cookie_header = cookie_header.strip()
+    if cookie_header.lower().startswith("cookie:"):
+        cookie_header = cookie_header[len("cookie:"):].strip()
+    return cookie_header
+
+
+def load_cached_cookie(cookie_file: Path) -> tuple[str, str]:
+    """读取本地 Cookie 请求头，返回 (Cookie, 来源)。环境变量优先。"""
+    env_cookie = normalize_cookie_header(os.getenv(COOKIE_ENV_VAR))
+    if env_cookie:
+        return env_cookie, f"环境变量 {COOKIE_ENV_VAR}"
+
+    cookie_files = [cookie_file]
+    # 兼容之前版本使用的隐藏文件名。
+    if cookie_file == DEFAULT_COOKIE_FILE:
+        cookie_files.append(LEGACY_COOKIE_FILE)
+
+    for current_file in cookie_files:
+        try:
+            file_cookie = normalize_cookie_header(current_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(f"读取本地 Cookie 文件失败 [{current_file}]: {exc}")
+            continue
+
+        if file_cookie:
+            return file_cookie, str(current_file)
+    return "", ""
+
+
+def apply_token(session: requests.Session, token: str) -> None:
+    """将 token 注入请求 session。"""
+    session.headers["Authorization"] = f"Bearer {normalize_token(token)}"
+
+
+def clear_token(session: requests.Session) -> None:
+    """移除 session 中的 Authorization，避免失效 token 影响后续登录。"""
+    session.headers.pop("Authorization", None)
+
+
+def apply_cookie_header(session: requests.Session, cookie_header: str) -> None:
+    """按原始 Cookie 请求头注入，支持非标准 Cookie 名称。"""
+    cookie_header = normalize_cookie_header(cookie_header)
+    if cookie_header:
+        session.headers["Cookie"] = cookie_header
+
+
+def clear_cookie_header(session: requests.Session) -> None:
+    """移除手工配置的 Cookie 请求头。"""
+    session.headers.pop("Cookie", None)
+
+
+def save_cached_token(token: str, token_file: Path) -> None:
+    """保存浏览器登录得到的新 token，并尽量限制文件权限。"""
+    token = normalize_token(token)
+    if not token:
+        return
+
+    try:
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token + "\n", encoding="utf-8")
+        try:
+            token_file.chmod(0o600)
+        except OSError:
+            # Windows 或某些文件系统可能不支持 chmod，不影响 token 使用。
+            pass
+        logger.info(f"已缓存登录 token: {token_file}")
+    except OSError as exc:
+        logger.warning(f"保存本地 token 失败 [{token_file}]: {exc}")
+
+
+def print_login_credentials(token: Optional[str], cookies: list[dict]) -> None:
+    """在扫码登录后输出可复制的 token 和 Cookie（内容属于敏感信息）。"""
+    token = normalize_token(token)
+    cookie_header = "; ".join(
+        f"{cookie.get('name', '')}={cookie.get('value', '')}"
+        for cookie in cookies
+        if cookie.get("name")
+    )
+
+    print(
+        "\n"
+        "══════════════════════════════════════════════\n"
+        "  登录凭证（敏感信息，请勿发送给他人）\n"
+        "  Token:\n"
+        f"  {token or '(未提取到 token)'}\n"
+        "  Cookie:\n"
+        f"  {cookie_header or '(未获取到 cookie)'}\n"
+        "══════════════════════════════════════════════\n",
+        flush=True,
+    )
+
+
 def check_login(session: requests.Session) -> bool:
     """检测当前 session 是否已登录（能否从详情接口取到联系电话）。
 
@@ -117,8 +250,8 @@ def check_login(session: requests.Session) -> bool:
         return False
 
 
-def browser_login(session: requests.Session) -> None:
-    """弹出 Chromium 浏览器让用户手动登录，登录后将 cookies 注入 session。"""
+def browser_login(session: requests.Session) -> Optional[str]:
+    """弹出 Chromium 浏览器手动登录，返回新 token 并注入 session。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -221,21 +354,50 @@ def browser_login(session: requests.Session) -> None:
         )
 
     if token:
-        session.headers["Authorization"] = f"Bearer {token}"
+        apply_token(session, token)
         logger.info("已从 localStorage 提取 token 并注入 Authorization 头")
     else:
         logger.warning("未能从 localStorage 获取 token，联系电话可能仍为空")
+    print_login_credentials(token, cookies)
+    return token
 
 
-def ensure_logged_in(session: requests.Session) -> None:
-    """若未登录则自动弹出浏览器引导登录，登录后再次验证。"""
+def ensure_logged_in(
+    session: requests.Session,
+    token_file: Path = DEFAULT_TOKEN_FILE,
+    cookie_file: Path = DEFAULT_COOKIE_FILE,
+) -> None:
+    """优先验证本地 token，失效或缺失时回退到浏览器登录流程。"""
+    cached_cookie, cookie_source = load_cached_cookie(cookie_file)
+    if cached_cookie:
+        apply_cookie_header(session, cached_cookie)
+        logger.info(f"已加载本地 Cookie（来源: {cookie_source}）")
+
+    cached_token, token_source = load_cached_token(token_file)
+    if cached_token:
+        logger.info(f"正在使用本地 token 验证登录状态（来源: {token_source}）")
+        apply_token(session, cached_token)
+        if check_login(session):
+            logger.info("本地 token 验证成功，可获取联系电话")
+            return
+
+        logger.warning("本地 token 无效或已过期，将回退到浏览器登录")
+        clear_token(session)
+    else:
+        logger.info("未找到本地 token，将使用现有登录检测流程")
+
     logger.info("正在检测登录状态（联系电话权限）...")
     if check_login(session):
         logger.info("已登录，可获取联系电话")
         return
 
     logger.warning(f"未登录或无联系电话权限，即将打开浏览器引导登录: {MAIN_URL}")
-    browser_login(session)
+    # 浏览器登录后优先使用浏览器刚拿到的 Cookie，避免旧的手工 Cookie 请求头覆盖它。
+    clear_cookie_header(session)
+    new_token = browser_login(session)
+    if new_token:
+        apply_token(session, new_token)
+        save_cached_token(new_token, token_file)
 
     if check_login(session):
         logger.info("登录验证成功，联系电话可正常获取")
@@ -554,6 +716,14 @@ def main():
         help=f"输出目录 (默认 {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
+        "--token-file", default=str(DEFAULT_TOKEN_FILE), metavar="文件",
+        help=f"本地 token 文件 (默认 {DEFAULT_TOKEN_FILE})，环境变量 {TOKEN_ENV_VAR} 优先",
+    )
+    parser.add_argument(
+        "--cookie-file", default=str(DEFAULT_COOKIE_FILE), metavar="文件",
+        help=f"本地 Cookie 文件 (默认 {DEFAULT_COOKIE_FILE})，环境变量 {COOKIE_ENV_VAR} 优先",
+    )
+    parser.add_argument(
         "--format", choices=["csv", "json", "both"], default="both",
         help="输出格式 (默认 both)",
     )
@@ -579,7 +749,11 @@ def main():
 
     # 抓详情时才需要登录（联系电话字段需要登录权限）
     if not args.no_detail:
-        ensure_logged_in(session)
+        ensure_logged_in(
+            session,
+            Path(args.token_file).expanduser().resolve(),
+            Path(args.cookie_file).expanduser().resolve(),
+        )
 
     all_jobs: list[dict] = []
     global_seen_ids: set = set()  # 跨城市去重

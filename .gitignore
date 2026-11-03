@@ -221,3 +221,9 @@ __marimo__/
 shaoguan/.DS_Store
 .DS_Store
 output/
+.gd_job_token
+.gd_job_cookie
+cookie.txt
+.playwright-mcp/
+.DS_Store
+tmp/

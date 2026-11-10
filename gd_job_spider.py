@@ -29,8 +29,8 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://ggfw.hrss.gd.gov.cn/recruitment/internet/main"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "output"
-DEFAULT_TOKEN_FILE = PROJECT_DIR / ".gd_job_token"
-DEFAULT_COOKIE_FILE = PROJECT_DIR / "cookie.txt"
+DEFAULT_TOKEN_FILE = PROJECT_DIR / "tk" / ".gd_job_token"
+DEFAULT_COOKIE_FILE = PROJECT_DIR / "tk" / "cookie.txt"
 LEGACY_COOKIE_FILE = PROJECT_DIR / ".gd_job_cookie"
 TOKEN_ENV_VAR = "GD_JOB_TOKEN"
 COOKIE_ENV_VAR = "GD_JOB_COOKIE"
@@ -181,7 +181,7 @@ def clear_cookie_header(session: requests.Session) -> None:
 
 
 def save_cached_token(token: str, token_file: Path) -> None:
-    """保存浏览器登录得到的新 token，并尽量限制文件权限。"""
+    """保存当前登录 token，并尽量限制文件权限。"""
     token = normalize_token(token)
     if not token:
         return
@@ -197,6 +197,25 @@ def save_cached_token(token: str, token_file: Path) -> None:
         logger.info(f"已缓存登录 token: {token_file}")
     except OSError as exc:
         logger.warning(f"保存本地 token 失败 [{token_file}]: {exc}")
+
+
+def save_cached_cookie(session: requests.Session, cookie_file: Path) -> None:
+    """保存当前会话用于目标网站的 Cookie 请求头。"""
+    request = session.prepare_request(requests.Request("GET", BASE_URL + "/"))
+    cookie_header = normalize_cookie_header(request.headers.get("Cookie"))
+    if not cookie_header:
+        return
+
+    try:
+        cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        cookie_file.write_text(cookie_header + "\n", encoding="utf-8")
+        try:
+            cookie_file.chmod(0o600)
+        except OSError:
+            pass
+        logger.info(f"已缓存登录 Cookie: {cookie_file}")
+    except OSError as exc:
+        logger.warning(f"保存本地 Cookie 失败 [{cookie_file}]: {exc}")
 
 
 def print_login_credentials(token: Optional[str], cookies: list[dict]) -> None:
@@ -379,6 +398,8 @@ def ensure_logged_in(
         apply_token(session, cached_token)
         if check_login(session):
             logger.info("本地 token 验证成功，可获取联系电话")
+            save_cached_cookie(session, cookie_file)
+            save_cached_token(session.headers.get("Authorization", ""), token_file)
             return
 
         logger.warning("本地 token 无效或已过期，将回退到浏览器登录")
@@ -389,6 +410,8 @@ def ensure_logged_in(
     logger.info("正在检测登录状态（联系电话权限）...")
     if check_login(session):
         logger.info("已登录，可获取联系电话")
+        save_cached_cookie(session, cookie_file)
+        save_cached_token(session.headers.get("Authorization", ""), token_file)
         return
 
     logger.warning(f"未登录或无联系电话权限，即将打开浏览器引导登录: {MAIN_URL}")
@@ -397,10 +420,11 @@ def ensure_logged_in(
     new_token = browser_login(session)
     if new_token:
         apply_token(session, new_token)
-        save_cached_token(new_token, token_file)
 
     if check_login(session):
         logger.info("登录验证成功，联系电话可正常获取")
+        save_cached_cookie(session, cookie_file)
+        save_cached_token(session.headers.get("Authorization", ""), token_file)
     else:
         logger.warning("登录验证未通过，联系电话可能仍为空（继续抓取其他字段）")
 
